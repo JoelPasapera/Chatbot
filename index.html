@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<!--
+  Mini chatbot — Puter.js (sin API key, sin backend)
+  Uso: guarda el archivo y ábrelo en el navegador. Primer mensaje: Puter abre
+  un popup de sesión gratuita (modelo "user-pays"). Permite popups si no aparece.
+  Modelos disponibles: https://developer.puter.com/ai/models/
+
+  Mejoras respecto a la versión base:
+   1. Streaming: la respuesta aparece token a token (puter.ai.chat con stream:true).
+   2. Markdown + código: se renderiza con marked y se sanitiza con DOMPurify
+      (sin sanitizar NO se debe usar innerHTML). Resaltado con highlight.js y
+      botón de copiar en cada bloque de código.
+   3. Persistencia: la conversación y el modelo se guardan en localStorage,
+      así que sobreviven al refresco. Botón "nuevo" para empezar de cero.
+
+  Dependencias por CDN (necesitas conexión; Puter ya la requiere de todos modos).
+-->
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini chat · Puter.js</title>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<style>
+  :root{
+    --bg:#0f1520;
+    --panel:#161f2c;
+    --line:#27344a;
+    --text:#e9eef6;
+    --muted:#8fa0b8;
+    --accent:#f3a93c;
+    --accent-text:#241a08;
+    --bot:#1c2738;
+    --code:#0c131e;
+    --error:#ff7a6e;
+  }
+  *{ box-sizing:border-box; }
+  html, body{ height:100%; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font:15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:flex;
+    justify-content:center;
+  }
+  .app{ display:flex; flex-direction:column; width:min(640px,100%); height:100dvh; }
+
+  /* Barra superior estilo terminal */
+  header{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:14px 18px; border-bottom:1px solid var(--line);
+  }
+  .brand{
+    display:flex; align-items:center; gap:9px;
+    font:600 13px/1 ui-monospace, "Cascadia Code", Consolas, monospace;
+    letter-spacing:.4px;
+  }
+  .dot{ width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .dot.busy{ background:var(--accent); animation:pulse .9s infinite alternate; }
+  @keyframes pulse{ to{ opacity:.35; } }
+  .tools{ display:flex; align-items:center; gap:8px; }
+  select{
+    background:var(--panel); color:var(--text);
+    border:1px solid var(--line); border-radius:8px; padding:7px 9px;
+    font:12px ui-monospace, Consolas, monospace; cursor:pointer;
+  }
+  .ghost{
+    background:var(--panel); color:var(--text);
+    border:1px solid var(--line); border-radius:8px; padding:7px 10px;
+    font:12px ui-monospace, Consolas, monospace; font-weight:500; cursor:pointer;
+  }
+  .ghost:hover{ border-color:var(--muted); }
+
+  /* Mensajes */
+  main{ flex:1; overflow-y:auto; padding:20px 18px; display:flex; flex-direction:column; gap:12px; }
+  .empty{ margin:auto; color:var(--muted); font-size:14px; text-align:center; max-width:38ch; }
+  .msg{
+    max-width:82%; padding:10px 14px; border-radius:14px;
+    overflow-wrap:anywhere;
+  }
+  .msg.user{
+    align-self:flex-end; background:var(--accent); color:var(--accent-text);
+    border-bottom-right-radius:4px; white-space:pre-wrap;
+  }
+  .msg.bot{
+    align-self:flex-start; background:var(--bot);
+    border:1px solid var(--line); border-bottom-left-radius:4px;
+  }
+  .msg.error{
+    align-self:flex-start; background:transparent;
+    border:1px dashed var(--error); color:var(--error); white-space:pre-wrap;
+  }
+
+  /* Contenido Markdown dentro de las respuestas del bot */
+  .msg.bot > *:first-child{ margin-top:0; }
+  .msg.bot > *:last-child{ margin-bottom:0; }
+  .msg.bot p{ margin:0 0 .6em; }
+  .msg.bot ul, .msg.bot ol{ margin:.3em 0 .6em; padding-left:1.3em; }
+  .msg.bot li{ margin:.15em 0; }
+  .msg.bot h1, .msg.bot h2, .msg.bot h3, .msg.bot h4{ margin:.7em 0 .35em; line-height:1.25; }
+  .msg.bot h1{ font-size:1.25em; } .msg.bot h2{ font-size:1.15em; }
+  .msg.bot h3{ font-size:1.05em; } .msg.bot h4{ font-size:1em; }
+  .msg.bot a{ color:var(--accent); text-decoration:underline; text-underline-offset:2px; }
+  .msg.bot code{
+    background:var(--code); border:1px solid var(--line); border-radius:5px;
+    padding:.05em .35em; font:13px ui-monospace, Consolas, monospace;
+  }
+  .msg.bot pre{
+    position:relative; margin:.5em 0; background:var(--code);
+    border:1px solid var(--line); border-radius:10px; overflow:auto;
+  }
+  .msg.bot pre code{
+    display:block; padding:12px 14px; background:none; border:0; border-radius:0;
+    font:13px/1.55 ui-monospace, Consolas, monospace;
+  }
+  .msg.bot blockquote{
+    margin:.5em 0; padding:.1em .9em; border-left:3px solid var(--line); color:var(--muted);
+  }
+  .msg.bot table{ border-collapse:collapse; margin:.5em 0; font-size:13px; }
+  .msg.bot th, .msg.bot td{ border:1px solid var(--line); padding:5px 9px; text-align:left; }
+  .msg.bot hr{ border:0; border-top:1px solid var(--line); margin:.7em 0; }
+  .copy-btn{
+    position:absolute; top:6px; right:6px;
+    background:var(--panel); color:var(--muted);
+    border:1px solid var(--line); border-radius:6px; padding:3px 8px;
+    font:11px ui-monospace, Consolas, monospace; cursor:pointer;
+    opacity:0; transition:opacity .12s;
+  }
+  .msg.bot pre:hover .copy-btn, .copy-btn:focus-visible{ opacity:1; }
+
+  .typing{ align-self:flex-start; display:flex; gap:5px; padding:14px; }
+  .typing i{ width:6px; height:6px; border-radius:50%; background:var(--muted); animation:blink 1.2s infinite; }
+  .typing i:nth-child(2){ animation-delay:.2s; }
+  .typing i:nth-child(3){ animation-delay:.4s; }
+  @keyframes blink{ 0%,60%,100%{ opacity:.25; } 30%{ opacity:1; } }
+
+  /* Compositor */
+  footer{ display:flex; gap:10px; padding:14px 18px 18px; border-top:1px solid var(--line); }
+  input{
+    flex:1; background:var(--panel); color:var(--text);
+    border:1px solid var(--line); border-radius:12px; padding:12px 14px; font:inherit;
+  }
+  input::placeholder{ color:var(--muted); }
+  button{
+    background:var(--accent); color:var(--accent-text);
+    border:0; border-radius:12px; padding:0 20px;
+    font-family:inherit; font-size:14px; font-weight:600; cursor:pointer;
+  }
+  button:disabled, input:disabled{ opacity:.55; cursor:default; }
+  :focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+  @media (prefers-reduced-motion: reduce){
+    .dot.busy, .typing i{ animation:none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="brand"><span class="dot" id="statusDot"></span>mini-chat</div>
+    <div class="tools">
+      <button id="newBtn" class="ghost" type="button" title="Empezar una conversación nueva">+ nuevo</button>
+      <select id="modelSelect" aria-label="Modelo">
+        <option value="openai/gpt-5.4-nano">GPT-5.4 Nano · rápido</option>
+        <option value="anthropic/claude-sonnet-4-6">Claude Sonnet 4.6</option>
+        <option value="deepseek/deepseek-r1-0528">DeepSeek R1 · razonamiento</option>
+      </select>
+    </div>
+  </header>
+
+  <main id="messages">
+    <p class="empty" id="emptyHint">Elige un modelo y escribe tu primer mensaje. La conversación se guarda en este navegador.</p>
+  </main>
+
+  <footer>
+    <input id="input" type="text" placeholder="Escribe un mensaje..." autocomplete="off" autofocus>
+    <button id="sendBtn" type="button">Enviar</button>
+  </footer>
+
+</div>
+
+<script src="https://js.puter.com/v2/"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  const messagesEl = document.getElementById('messages');
+  const inputEl    = document.getElementById('input');
+  const sendBtn    = document.getElementById('sendBtn');
+  const modelEl    = document.getElementById('modelSelect');
+  const newBtn     = document.getElementById('newBtn');
+  const dotEl      = document.getElementById('statusDot');
+
+  const STORE_KEY = 'minichat:v1';
+  const history = []; // [{role:'user'|'assistant', content:'...'}]
+
+  if (typeof marked !== 'undefined') marked.setOptions({ gfm: true, breaks: true });
+
+  /* ---------- Render seguro de Markdown ----------
+     Si marked/DOMPurify no cargaron (sin conexión o CDN bloqueado), caemos a
+     texto plano escapado: nunca se inyecta HTML sin sanitizar. */
+  function renderMarkdown(text){
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined'){
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+    return DOMPurify.sanitize(marked.parse(text));
+  }
+
+  // Resaltado de código, enlaces a pestaña nueva y botón de copiar.
+  function enhance(container){
+    container.querySelectorAll('a[href]').forEach(a => {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    });
+    if (typeof hljs !== 'undefined'){
+      container.querySelectorAll('pre code').forEach(b => { try { hljs.highlightElement(b); } catch {} });
+    }
+    container.querySelectorAll('pre').forEach(pre => {
+      if (pre.querySelector('.copy-btn')) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy-btn';
+      btn.textContent = 'copiar';
+      btn.addEventListener('click', () => {
+        const code = (pre.querySelector('code') || pre).innerText;
+        navigator.clipboard?.writeText(code)
+          .then(() => { btn.textContent = 'copiado'; setTimeout(() => btn.textContent = 'copiar', 1400); })
+          .catch(() => {});
+      });
+      pre.appendChild(btn);
+    });
+  }
+
+  function scrollDown(){ messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+  // Mensajes de usuario y de error: texto plano (sin riesgo de inyección).
+  function addMsg(text, cls){
+    const el = document.createElement('div');
+    el.className = 'msg ' + cls;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    scrollDown();
+    return el;
+  }
+
+  function createBotBubble(){
+    const el = document.createElement('div');
+    el.className = 'msg bot';
+    messagesEl.appendChild(el);
+    scrollDown();
+    return el;
+  }
+
+  function addTyping(){
+    const el = document.createElement('div');
+    el.className = 'typing';
+    el.innerHTML = '<i></i><i></i><i></i>';
+    messagesEl.appendChild(el);
+    scrollDown();
+    return el;
+  }
+
+  function setBusy(busy){
+    inputEl.disabled = busy;
+    sendBtn.disabled = busy;
+    dotEl.classList.toggle('busy', busy);
+  }
+
+  /* ---------- Persistencia (localStorage) ---------- */
+  function save(){
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ model: modelEl.value, history })); }
+    catch {}
+  }
+
+  function load(){
+    let data;
+    try { data = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); }
+    catch { data = null; }
+    if (!data) return;
+    if (data.model) modelEl.value = data.model;
+    if (Array.isArray(data.history) && data.history.length){
+      document.getElementById('emptyHint')?.remove();
+      for (const m of data.history){
+        history.push(m);
+        if (m.role === 'user'){
+          addMsg(m.content, 'user');
+        } else {
+          const b = createBotBubble();
+          b.innerHTML = renderMarkdown(m.content);
+          enhance(b);
+        }
+      }
+      scrollDown();
+    }
+  }
+
+  function newChat(){
+    history.length = 0;
+    messagesEl.innerHTML = '';
+    const p = document.createElement('p');
+    p.className = 'empty';
+    p.id = 'emptyHint';
+    p.textContent = 'Elige un modelo y escribe tu primer mensaje. La conversación se guarda en este navegador.';
+    messagesEl.appendChild(p);
+    save();
+    inputEl.focus();
+  }
+
+  /* ---------- Envío con streaming ---------- */
+  async function send(){
+    const text = inputEl.value.trim();
+    if (!text || sendBtn.disabled) return;
+
+    if (typeof puter === 'undefined'){
+      addMsg('Puter.js no cargó. Abre este archivo localmente en tu navegador (la vista previa puede bloquear scripts externos).', 'error');
+      return;
+    }
+
+    document.getElementById('emptyHint')?.remove();
+    addMsg(text, 'user');
+    history.push({ role: 'user', content: text });
+    inputEl.value = '';
+    save();                 // guarda la pregunta por si se refresca a mitad
+    setBusy(true);
+
+    const typing = addTyping();
+    let bubble = null, buffer = '', rafPending = false;
+
+    const flush = () => {
+      rafPending = false;
+      if (bubble){ bubble.innerHTML = renderMarkdown(buffer); scrollDown(); }
+    };
+
+    try {
+      const response = await puter.ai.chat(history, { model: modelEl.value, stream: true });
+
+      for await (const part of response){
+        const delta = part?.text;          // los modelos de razonamiento mandan part.reasoning aparte; aquí mostramos solo la respuesta
+        if (!delta) continue;
+        if (!bubble){ typing.remove(); bubble = createBotBubble(); }
+        buffer += delta;
+        if (!rafPending){ rafPending = true; requestAnimationFrame(flush); }
+      }
+
+      if (!bubble){ typing.remove(); bubble = createBotBubble(); }
+      buffer = buffer.trim() || '(respuesta vacía)';
+      bubble.innerHTML = renderMarkdown(buffer);   // render final completo
+      enhance(bubble);                             // resaltado + botón copiar
+      scrollDown();
+      history.push({ role: 'assistant', content: buffer });
+      save();
+    } catch (err) {
+      typing.remove();
+      bubble?.remove();
+      history.pop();        // descarta el turno fallido para reintentar limpio
+      save();
+      const msg = err?.error?.message || err?.message || 'No se pudo obtener respuesta. Revisa el popup de Puter e inténtalo de nuevo.';
+      addMsg('Error: ' + msg, 'error');
+    } finally {
+      setBusy(false);
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', send);
+  inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  newBtn.addEventListener('click', newChat);
+  modelEl.addEventListener('change', save);
+
+  load();   // restaura la conversación guardada al abrir
+</script>
+</body>
+</html>
